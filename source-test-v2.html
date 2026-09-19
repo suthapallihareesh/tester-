@@ -1,0 +1,602 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Relay — source/model live test v2</title>
+<style>
+  :root{ --ink:#090b16; --panel:#0f1226; --line:#242a4d; --text:#eef0fb; --dim:#9aa0c4;
+    --ok:#34d399; --err:#f0665a; --pending:#8b6cf6; --warn:#f5a623; --cors:#5b9dd9; --unverified:#e879b9; }
+  *{box-sizing:border-box}
+  body{background:var(--ink);color:var(--text);font-family:'IBM Plex Mono',Consolas,monospace;
+    margin:0;padding:24px;font-size:13px;line-height:1.5}
+  h1{font-size:16px;margin-bottom:4px}
+  p.sub{color:var(--dim);margin-bottom:14px;font-size:12px;max-width:900px}
+  .confidence{display:inline-block;padding:1px 8px;border-radius:10px;font-size:10px;
+    font-weight:700;text-transform:uppercase;letter-spacing:.03em;margin-left:8px}
+  .confidence.confirmed{background:rgba(52,211,153,.15);color:var(--ok)}
+  .confidence.new{background:rgba(245,166,35,.15);color:var(--warn)}
+  .result{display:inline-block;padding:1px 7px;border-radius:9px;font-size:9px;
+    font-weight:700;text-transform:uppercase;letter-spacing:.02em;margin-left:8px;white-space:nowrap}
+  .result.confirmed{background:rgba(52,211,153,.15);color:var(--ok)}
+  .result.limit{background:rgba(245,166,35,.15);color:var(--warn)}
+  .result.cors{background:rgba(91,157,217,.18);color:var(--cors)}
+  .result.timeout{background:rgba(154,160,196,.18);color:var(--dim)}
+  .result.unverified{background:rgba(232,121,185,.18);color:var(--unverified)}
+  #legend{margin-bottom:14px;font-size:11px;color:var(--dim)}
+  #legend .result{margin-left:0;margin-right:4px}
+  #controls{margin-bottom:18px;display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+  button{background:var(--pending);color:#fff;border:none;border-radius:8px;padding:9px 16px;
+    font-size:13px;cursor:pointer;font-family:inherit}
+  button:disabled{opacity:.4;cursor:not-allowed}
+  button.secondary{background:var(--panel);border:1px solid var(--line);color:var(--text)}
+  #summary{margin-bottom:16px;padding:10px 14px;background:var(--panel);border:1px solid var(--line);
+    border-radius:8px;font-size:12px;display:none}
+  table{width:100%;border-collapse:collapse}
+  th,td{text-align:left;padding:7px 10px;border-bottom:1px solid var(--line);font-size:12px;
+    vertical-align:top}
+  th{color:var(--dim);font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:.03em}
+  .grp{background:#151936;font-weight:600;color:#c9d0f5}
+  .grp .confidence{vertical-align:middle}
+  .status{font-weight:700}
+  .status.pass{color:var(--ok)}
+  .status.fail{color:var(--err)}
+  .status.pending{color:var(--dim)}
+  .status.running{color:var(--pending)}
+  .detail{color:var(--dim);font-size:11px;max-width:480px;word-break:break-word}
+  code{background:#1c2140;padding:1px 5px;border-radius:4px;font-size:11px}
+</style>
+</head>
+<body>
+
+<h1>Relay source/model live test v2</h1>
+<p class="sub">29 model/source combinations across 12 providers. Every model carries its own result tag from the last live run (see legend below) — 7 <span class="result confirmed">confirmed</span>, 14 <span class="result limit">limit hit</span>, 7 <span class="result cors">cors</span>, and 1 <span class="result timeout">timeout</span>. The source-level <span class="confidence confirmed">confirmed</span>/<span class="confidence new">new</span> badge on each group header means something different — whether that source was already known-good before this round of testing — from the per-model tag, which reflects what actually happened when it was run. Pruning policy: a row stays if it's limit/cors/timeout, since none of those prove the model or endpoint is actually wrong, just that it didn't answer this time; a "confirmed" tag also isn't erased by a later limit/cors/timeout result on the same row, since a model that's demonstrably worked once doesn't stop being proof of that just because one later run got throttled — the live Status/Detail columns still show exactly what happened on the most recent run regardless. A row is removed only for a genuine "this doesn't work at all" signal: unrecognized/retired model id, or a hard requirement for a key/login/payment despite being marketed as anonymous. Removed so far, across every round: OVH's Llama-3.1-8B-Instruct and Qwen3-32B (both 404 model_not_found — the latter had been rate-limited, not gone, in an earlier round, so this is a live retirement), three of AI Horde's four models (406 "Model None not known!"), Pollinations text's mistral (404 "Model not found: mistral" on their legacy endpoint), all of PaxSenix (401 key_required despite being marketed "unauthenticated"), all of VLM Run (403 "sign in to use the Completions API" despite a documented guest cap), and all of Puter.js (requires login in practice despite a documented Anonymous tier). This round's addition, DevToolBox API, passed on its first live run (real response: "OK") and is now tagged confirmed.</p>
+
+<div id="legend"><span class="result confirmed">confirmed</span>actually passed with real content
+  <span class="result timeout">verified</span>no response in time — endpoint reachable, inconclusive beyond that
+  <span class="result limit">verified 2</span>429/rate-limited — endpoint is real, just full right now
+  <span class="result cors">verified 3</span>blocked by the browser, permanent for cross-origin calls, not retriable
+  <span class="result unverified">unverified</span>added this round from research, never yet live-tested</div>
+
+<div id="controls">
+  <button id="runBtn" onclick="runAll()">Run all tests</button>
+  <button class="secondary" onclick="runGroup('ovh')">Run OVH only (slow, 8s gaps)</button>
+  <button class="secondary" onclick="runGroup(['pollinations','kilo'])">Run new sources only</button>
+  <button class="secondary" onclick="runGroup(['duckai','craiyon'])">Run reverse-engineered only (Duck.ai + Craiyon, likely CORS-blocked)</button>
+  <button class="secondary" onclick="runGroup('pollinationsimg')">Run Pollinations Image only</button>
+  <button class="secondary" onclick="runGroup('devtoolbox')">Run DevToolBox API only</button>
+  <span id="progress" style="color:var(--dim);font-size:12px"></span>
+</div>
+
+<div id="summary"></div>
+
+<table>
+  <thead><tr><th style="width:190px">Source</th><th style="width:220px">Model ID</th><th style="width:90px">Status</th><th>Detail</th></tr></thead>
+  <tbody id="rows"></tbody>
+</table>
+
+<script>
+var ENDPOINTS = {
+  ovh: { url: 'https://oai.endpoints.kepler.ai.cloud.ovh.net/v1/chat/completions', headers: {}, gapMs: 8000 },
+  llm7: { url: 'https://api.llm7.io/v1/chat/completions', headers: { 'Authorization': 'Bearer unused' }, gapMs: 1500 },
+  aihorde: { url: 'https://oai.aihorde.net/v1/chat/completions', headers: { 'Authorization': 'Bearer 0000000000' }, gapMs: 1500 }, // community GPU queue — timeouts below are longer than model size alone would suggest, to absorb queueing
+  chutes: { url: 'https://llm.chutes.ai/v1/chat/completions', headers: {}, gapMs: 1500 },
+  pollinations: { url: 'https://text.pollinations.ai/openai', headers: {}, gapMs: 3000 },
+  kilo: { url: 'https://api.kilo.ai/api/gateway/chat/completions', headers: {}, gapMs: 3000 }, // anonymous cap: 200 req/hr per IP, per Kilo's own docs. Models list below is live-verified, not doc examples — see comment above SOURCES.kilo
+  duckai: { statusUrl: 'https://duckduckgo.com/duckchat/v1/status', url: 'https://duckduckgo.com/duckchat/v1/chat', headers: {}, gapMs: 4000 }, // reverse-engineered, not OpenAI-schema — see testDuckAI(). CORS will very likely kill this from any origin other than duckduckgo.com itself.
+  craiyon: { url: 'https://api.craiyon.com/v3', headers: {}, gapMs: 2000 }, // image-gen, not chat — see testCraiyon().
+  freegptrender: { url: 'https://free-unoficial-gpt4o-mini-api-g70n.onrender.com/chat/', headers: {}, gapMs: 3000 }, // community project on Render's FREE dyno tier — cold start after idle can take 50s+. Note: "unoficial" is a typo in the actual live URL, not a mistake here.
+  unturf: { url: 'https://hermes.ai.unturf.com/v1/chat/completions', headers: {}, gapMs: 3000 }, // volunteer/idle-GPU compute pool, public domain + open source (same spirit as AI Horde)
+  pollinationsimg: { url: 'https://image.pollinations.ai/prompt/', headers: {}, gapMs: 16000 }, // separate legacy endpoint from text.pollinations.ai above — image generation, not chat. Anonymous tier is documented at 1 request/15s (may include a watermark); confirmed live via curl by independent write-ups dated 2026-08-21. Note: Pollinations' NEWER gen.pollinations.ai gateway now requires an sk_/pk_ key for everything — this older /prompt/ endpoint is the one that's still keyless.
+  devtoolbox: { url: 'https://devtoolbox-api.devtoolbox-api.workers.dev/ai/generate', headers: {}, gapMs: 3000 } // one solo dev's own Cloudflare Worker, calling Workers AI server-side with their own account and exposing it publicly with no auth. Docs page (fetched live) states 100,000 requests/day, no key, no signup — a crypto-payment tier exists but only to skip that shared daily cap, it's not required to use the free one.
+};
+
+// Every model below carries its own timeoutMs, sized to what that specific model/source
+// combination should realistically need — not one blanket number for the whole file.
+// Rules of thumb used: small/fast models (7-9B, "-flash", "-nano", "-mini") get short
+// timeouts (~12-15s); mid-size dense models (~20-32B) get ~18-20s; large dense models
+// (70B+) and MoE models with a big total param count get ~28-35s; explicit reasoning/
+// "thinking" models (DeepSeek-R1, minimax) get ~30-45s since they generate hidden
+// reasoning tokens before answering; anything behind a community queue (AI Horde,
+// unturf) or a cold-startable free dyno (the Render proxy) gets extra headroom on top
+// of its size-based number, since queueing/cold-start time has nothing to do with the
+// model itself.
+var SOURCES = {
+  ovh: {
+    label: 'OVH Kepler', confidence: 'confirmed',
+    models: [
+      { id: 'Qwen3.6-27B', timeoutMs: 20000, lastResult: 'limit' },
+      { id: 'Qwen3.5-397B-A17B', timeoutMs: 35000, lastResult: 'limit' },              // huge total param MoE
+      // Qwen3-32B removed 2026-09-19: live run returned HTTP 404 {"code":"model_not_found",
+      // "message":"The model `Qwen3-32B` does not exist."} — it was rate-limited (not gone) in an
+      // earlier round, so OVH appears to have retired or renamed it since.
+      { id: 'Qwen2.5-VL-72B-Instruct', timeoutMs: 30000, lastResult: 'limit' },        // 72B dense + vision overhead
+      { id: 'Mistral-Small-3.2-24B-Instruct-2506', timeoutMs: 18000, lastResult: 'confirmed' },
+      { id: 'Mistral-Nemo-Instruct-2407', timeoutMs: 15000, lastResult: 'confirmed' }, // 12B
+      { id: 'gpt-oss-20b', timeoutMs: 15000, lastResult: 'limit' },
+      { id: 'gpt-oss-120b', timeoutMs: 28000, lastResult: 'limit' },
+      { id: 'Qwen3.5-9B', timeoutMs: 12000, lastResult: 'limit' },
+      { id: 'Qwen3-Coder-30B-A3B-Instruct', timeoutMs: 16000, lastResult: 'limit' },   // MoE, only 3B active
+      { id: 'Mistral-7B-Instruct-v0.3', timeoutMs: 12000, lastResult: 'limit' },
+      { id: 'Meta-Llama-3_3-70B-Instruct', timeoutMs: 28000, lastResult: 'limit' }
+      // Llama-3.1-8B-Instruct removed 2026-09-15: live run returned HTTP 404 model_not_found
+      // ("The model `Llama-3.1-8B-Instruct` does not exist") — not a rate limit, not CORS, just wrong.
+    ]
+  },
+  llm7: {
+    label: 'LLM7.io', confidence: 'confirmed',
+    models: [
+      { id: 'codestral-latest', timeoutMs: 20000, lastResult: 'confirmed' },
+      { id: 'minimax-m2.7', timeoutMs: 30000, lastResult: 'confirmed' }   // MiniMax's M-series reasons before answering
+    ]
+  },
+  aihorde: {
+    label: 'AI Horde', confidence: 'confirmed',
+    // Reduced 2026-09-15: live run returned HTTP 406 {"detail":"Model None not known!"} for the
+    // other three — a genuine "this model id isn't recognized" error, not rate-limit or CORS, so
+    // per policy they're out rather than kept on the strength of an untested guess.
+    models: [
+      { id: 'koboldcpp/L3-8B-Stheno-v3.2', timeoutMs: 30000, lastResult: 'confirmed' }
+    ]
+  },
+  // paxsenix removed 2026-09-15: live run returned HTTP 401 {"error":"key_required","message":
+  // "API key is required to create a request."} — despite being labeled an "unauthenticated tier"
+  // by its own docs, it isn't one in practice. Not rate-limit, not CORS — a genuine failure.
+  chutes: {
+    label: 'Chutes.ai (anonymous fallback path)', confidence: 'new',
+    models: [
+      { id: 'deepseek-ai/DeepSeek-R1', timeoutMs: 45000, lastResult: 'limit' },   // reasoning model — generates a long hidden chain-of-thought first
+      { id: 'Qwen/Qwen3-32B-TEE', timeoutMs: 25000, lastResult: 'limit' }         // TEE (confidential compute) adds encryption/attestation overhead on top of a 32B model
+    ]
+  },
+  pollinations: {
+    label: 'Pollinations (text.pollinations.ai)', confidence: 'confirmed',
+    // mistral removed 2026-09-19: earlier a bare timeout (kept, per policy), but the live run now
+    // returns HTTP 404 {"error":"Model not found: mistral. This is our legacy API...","status":404}
+    // — a genuine "this model id is gone from this endpoint" signal, not a rate limit or CORS block.
+    // openai's lastResult is 'limit', not 'confirmed', even though the harness itself scored it a
+    // pass: the response body says "The API key used for this request has reached its budget" —
+    // a rate/quota condition wearing a 200 OK, not an actual successful completion.
+    models: [
+      { id: 'openai', timeoutMs: 15000, lastResult: 'limit' },
+      { id: 'claude-haiku-4.5', timeoutMs: 18000, lastResult: 'limit' }
+    ]
+  },
+  kilo: {
+    label: 'Kilo AI Gateway (anonymous free pool)', confidence: 'new',
+    // Fixed 2026-09-14: hit https://api.kilo.ai/api/gateway/models directly (no key needed) and
+    // found the two model IDs previously here (minimax/minimax-m2.1:free, z-ai/glm-5:free) do not
+    // exist in the live catalog at all — they were stale doc examples, not real entries. These three
+    // are confirmed live in that response just now.
+    models: [
+      { id: 'kilo-auto/free', timeoutMs: 25000, lastResult: 'cors' },                       // Kilo's own router across whatever free models are live — most durable pick since it isn't tied to one rotating model
+      { id: 'nvidia/nemotron-3-ultra-550b-a55b:free', timeoutMs: 32000, lastResult: 'cors' }, // 550B total / 55B active MoE reasoning model
+      { id: 'liquid/lfm-2.5-2.6b:free', timeoutMs: 14000, lastResult: 'cors' }              // small, fast
+    ]
+  },
+  // vlmrun removed 2026-09-15: live run returned HTTP 403 {"detail":"Guest users can only use the
+  // playground chat. Sign in to use the Completions API."} — so despite the docs describing a
+  // 10 chats/day guest cap, the actual Completions endpoint isn't anonymous-callable at all; only
+  // their web playground is. Not rate-limit, not CORS — a genuine "this doesn't work" finding.
+  duckai: {
+    label: 'Duck.ai (reverse-engineered, expect CORS fail)', confidence: 'new', custom: 'duckai',
+    // Fixed 2026-09-14: DuckDuckGo's own help pages, cross-checked against a leaked internal PR
+    // ("Duck.ai model picker now offers Claude Haiku 2.5 where it used to list GPT-4o mini"),
+    // confirm gpt-4o-mini and claude-3-haiku-20240307 (previously here) are NOT the current free
+    // lineup. Current free models per DDG's help page: Claude 4.5 Haiku, Mistral Small 4, GPT-5.4
+    // nano/mini, gpt-oss-120b, Gemma 4 31B. DDG doesn't publish the literal API wire-format model
+    // string though, so these two are the best-supported guesses (gpt-oss-120b matches OpenAI's own
+    // canonical open-weight name; claude-haiku-4-5-20251001 is Anthropic's own current API id) —
+    // if either 404s as an unknown model, that's a naming mismatch to chase, not proof Duck.ai is dead.
+    models: [
+      { id: 'gpt-oss-120b', timeoutMs: 22000, lastResult: 'cors' },
+      { id: 'claude-haiku-4-5-20251001', timeoutMs: 18000, lastResult: 'cors' }
+    ]
+  },
+  craiyon: {
+    label: 'Craiyon (api.craiyon.com/v3 — image-gen, not chat)', confidence: 'new', custom: 'craiyon',
+    models: [ { id: 'art', timeoutMs: 90000, lastResult: 'cors' } ]   // their own docs: 45-90s per generation on the free tier
+  },
+  // puter removed 2026-09-15: requires user login in practice, despite the "User-Pays anonymous
+  // gateway" framing and a documented Anonymous rate-limit tier in its own docs. Docs describing
+  // an anonymous tier isn't the same as the SDK actually staying anonymous when called — same
+  // lesson as PaxSenix's "unauthenticated tier" and VLM Run's guest cap, both of which also turned
+  // out to gate on auth once actually run.
+  freegptrender: {
+    label: 'Free-unofficial-gpt4o-mini-api (community, hosted on Render free tier — expect slow cold starts, possible downtime)', confidence: 'new', custom: 'freegptrender',
+    models: [ { id: 'gpt-4o-mini', timeoutMs: 60000, lastResult: 'cors' } ]   // cold Render dyno wake-up dominates over model size here
+  },
+  unturf: {
+    label: 'uncloseai.com / Hermes (unturf.com volunteer-compute pool, OpenAI-compatible, public domain)', confidence: 'new',
+    models: [ { id: 'Lorbus/Qwen3.6-27B-int4-AutoRound', timeoutMs: 30000, lastResult: 'confirmed' } ]   // mid-size model, but volunteer hardware can be busy/queued
+  },
+  pollinationsimg: {
+    label: 'Pollinations Image (image.pollinations.ai — separate modality/endpoint from Pollinations text above, documented 1req/15s anonymous limit)', confidence: 'confirmed', custom: 'pollinationsimg',
+    // turbo restored 2026-09-15: policy now keeps timeouts too, not just rate-limit/CORS.
+    // flux stays regardless: its HTTP 500 body is "Gen Sana request failed with 429: ... Per-user
+    // limit of 300 RPM exceeded ... community_model_rate_limit" — the outer 500 is just how
+    // Pollinations surfaces an inner rate-limit failure, so this was always a rate-limit case.
+    models: [
+      { id: 'flux', timeoutMs: 25000, lastResult: 'limit' },
+      { id: 'turbo', timeoutMs: 15000, lastResult: 'timeout' }
+    ]
+  },
+  devtoolbox: {
+    label: 'DevToolBox API (devtoolbox-api.workers.dev — one dev\'s own Cloudflare Worker, 100k req/day shared free tier)', confidence: 'new', custom: 'devtoolbox',
+    models: [ { id: 'llama-3.2 (fixed, no model selector)', timeoutMs: 20000, lastResult: 'confirmed' } ]   // this API has no model param at all — every /ai/generate call hits whatever backend model the dev wired up (Llama 3.2 per their write-up). Passed with response "OK" on its first live run, 2026-09-19.
+  }
+};
+var rowsEl = document.getElementById('rows');
+var rowMap = {};
+
+var RESULT_LABELS = { confirmed: 'confirmed', timeout: 'verified', limit: 'verified 2', cors: 'verified 3', unverified: 'unverified' };
+
+function buildRows() {
+  rowsEl.innerHTML = '';
+  rowMap = {};
+  Object.keys(SOURCES).forEach(function (sk) {
+    var grpRow = document.createElement('tr');
+    grpRow.innerHTML = '<td class="grp" colspan="4">' + SOURCES[sk].label +
+      ' <span class="confidence ' + SOURCES[sk].confidence + '">' + SOURCES[sk].confidence + '</span></td>';
+    rowsEl.appendChild(grpRow);
+    SOURCES[sk].models.forEach(function (m) {
+      var tr = document.createElement('tr');
+      var key = sk + '::' + m.id;
+      var resultBadge = m.lastResult
+        ? ' <span class="result ' + m.lastResult + '">' + RESULT_LABELS[m.lastResult] + '</span>'
+        : '';
+      tr.innerHTML = '<td></td><td><code>' + m.id + '</code>' + resultBadge + '</td>' +
+        '<td class="status pending" id="st-' + key + '">pending</td>' +
+        '<td class="detail" id="dt-' + key + '"></td>';
+      rowsEl.appendChild(tr);
+      rowMap[key] = { source: sk, model: m.id, timeoutMs: m.timeoutMs };
+    });
+  });
+}
+buildRows();
+
+function setStatus(key, cls, text, detail) {
+  var st = document.getElementById('st-' + key);
+  var dt = document.getElementById('dt-' + key);
+  st.className = 'status ' + cls;
+  st.textContent = text;
+  if (detail) dt.textContent = detail;
+}
+
+function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+function secs(ms) { return Math.round(ms / 1000) + 's'; }
+
+async function testOne(sk, modelId, timeoutMs) {
+  if (SOURCES[sk].custom === 'duckai') return testDuckAI(sk, modelId, timeoutMs);
+  if (SOURCES[sk].custom === 'craiyon') return testCraiyon(sk, modelId, timeoutMs);
+  if (SOURCES[sk].custom === 'freegptrender') return testFreeGPTRender(sk, modelId, timeoutMs);
+  if (SOURCES[sk].custom === 'devtoolbox') return testDevToolBox(sk, modelId, timeoutMs);
+  if (SOURCES[sk].custom === 'pollinationsimg') return testPollinationsImg(sk, modelId, timeoutMs);
+  var key = sk + '::' + modelId;
+  setStatus(key, 'running', 'testing…', '');
+  var ep = ENDPOINTS[sk];
+  var controller = new AbortController();
+  var timeout = setTimeout(function () { controller.abort(); }, timeoutMs);
+  try {
+    var res = await fetch(ep.url, {
+      method: 'POST',
+      headers: Object.assign({ 'Content-Type': 'application/json' }, ep.headers),
+      body: JSON.stringify({ model: modelId, messages: [{ role: 'user', content: 'Reply with only the word OK.' }], stream: false }),
+      signal: controller.signal
+    });
+    clearTimeout(timeout);
+    var text = await res.text();
+    if (!res.ok) {
+      setStatus(key, 'fail', 'HTTP ' + res.status, text.slice(0, 300));
+      return { ok: false, status: res.status, detail: text.slice(0, 300) };
+    }
+    var json;
+    try { json = JSON.parse(text); } catch (e) {
+      setStatus(key, 'fail', 'bad JSON', text.slice(0, 300));
+      return { ok: false, status: 'parse-error', detail: text.slice(0, 300) };
+    }
+    if (json.error) {
+      var em = typeof json.error === 'string' ? json.error : (json.error.message || JSON.stringify(json.error));
+      setStatus(key, 'fail', 'API error', em.slice(0, 300));
+      return { ok: false, status: 'api-error', detail: em.slice(0, 300) };
+    }
+    var content = json.choices && json.choices[0] && json.choices[0].message && json.choices[0].message.content;
+    if (content) {
+      setStatus(key, 'pass', 'OK', 'response: "' + content.slice(0, 120) + '"');
+      return { ok: true, detail: content.slice(0, 120) };
+    }
+    setStatus(key, 'fail', 'empty', JSON.stringify(json).slice(0, 300));
+    return { ok: false, status: 'empty', detail: JSON.stringify(json).slice(0, 300) };
+  } catch (e) {
+    clearTimeout(timeout);
+    var msg = (e && e.message) || String(e);
+    var label = /abort/i.test(msg) ? ('timeout (' + secs(timeoutMs) + ')') : (/Failed to fetch|NetworkError/i.test(msg) ? 'network/CORS fail' : 'error');
+    setStatus(key, 'fail', label, msg);
+    return { ok: false, status: 'network', detail: msg };
+  }
+}
+
+// Duck.ai isn't OpenAI-schema: you first GET a vqd token from /status, then POST it
+// as a header to /chat, which streams back SSE lines rather than one JSON blob.
+// Reading a custom response header (x-vqd-4) cross-origin also requires the server to
+// expose it via Access-Control-Expose-Headers, which it has no reason to do for a
+// third-party page — so a clean CORS fail here is the expected, informative outcome.
+async function testDuckAI(sk, modelId, timeoutMs) {
+  var key = sk + '::' + modelId;
+  var ep = ENDPOINTS[sk];
+  setStatus(key, 'running', 'fetching vqd token…', '');
+  var controller = new AbortController();
+  var timeout = setTimeout(function () { controller.abort(); }, timeoutMs);
+  try {
+    var statusRes = await fetch(ep.statusUrl, {
+      headers: Object.assign({ 'x-vqd-accept': '1' }, ep.headers),
+      signal: controller.signal
+    });
+    var vqd = statusRes.headers.get('x-vqd-4');
+    if (!vqd) {
+      clearTimeout(timeout);
+      setStatus(key, 'fail', 'no vqd token', 'status HTTP ' + statusRes.status + ', no x-vqd-4 header readable (CORS likely stripped it)');
+      return { ok: false, status: 'no-vqd', detail: 'no x-vqd-4 header' };
+    }
+    setStatus(key, 'running', 'got token, chatting…', '');
+    var chatRes = await fetch(ep.url, {
+      method: 'POST',
+      headers: Object.assign({ 'Content-Type': 'application/json', 'x-vqd-4': vqd }, ep.headers),
+      body: JSON.stringify({ model: modelId, messages: [{ role: 'user', content: 'Reply with only the word OK.' }] }),
+      signal: controller.signal
+    });
+    clearTimeout(timeout);
+    var raw = await chatRes.text();
+    if (!chatRes.ok) {
+      setStatus(key, 'fail', 'HTTP ' + chatRes.status, raw.slice(0, 300));
+      return { ok: false, status: chatRes.status, detail: raw.slice(0, 300) };
+    }
+    var content = '';
+    raw.split('\n').forEach(function (line) {
+      line = line.trim();
+      if (line.indexOf('data:') !== 0) return;
+      var payload = line.slice(5).trim();
+      if (!payload || payload === '[DONE]') return;
+      try {
+        var obj = JSON.parse(payload);
+        if (obj.message) content += obj.message;
+      } catch (e) { /* not every SSE line is JSON we care about */ }
+    });
+    if (content) {
+      setStatus(key, 'pass', 'OK', 'response: "' + content.slice(0, 120) + '"');
+      return { ok: true, detail: content.slice(0, 120) };
+    }
+    setStatus(key, 'fail', 'empty', raw.slice(0, 300));
+    return { ok: false, status: 'empty', detail: raw.slice(0, 300) };
+  } catch (e) {
+    clearTimeout(timeout);
+    var msg = (e && e.message) || String(e);
+    var label = /abort/i.test(msg) ? ('timeout (' + secs(timeoutMs) + ')') : (/Failed to fetch|NetworkError/i.test(msg) ? 'network/CORS fail' : 'error');
+    setStatus(key, 'fail', label, msg);
+    return { ok: false, status: 'network', detail: msg };
+  }
+}
+
+// Craiyon returns base64 images + a description, not a chat completion — and their own
+// docs say a generation takes ~45-90s on the free tier, hence the long default timeout.
+async function testCraiyon(sk, modelId, timeoutMs) {
+  var key = sk + '::' + modelId;
+  var ep = ENDPOINTS[sk];
+  setStatus(key, 'running', 'generating (can take up to ' + secs(timeoutMs) + ')…', '');
+  var controller = new AbortController();
+  var timeout = setTimeout(function () { controller.abort(); }, timeoutMs);
+  try {
+    var res = await fetch(ep.url, {
+      method: 'POST',
+      headers: Object.assign({ 'Content-Type': 'application/json' }, ep.headers),
+      body: JSON.stringify({ prompt: 'a single red apple on a white background', model: modelId }),
+      signal: controller.signal
+    });
+    clearTimeout(timeout);
+    var text = await res.text();
+    if (!res.ok) {
+      setStatus(key, 'fail', 'HTTP ' + res.status, text.slice(0, 300));
+      return { ok: false, status: res.status, detail: text.slice(0, 300) };
+    }
+    var json;
+    try { json = JSON.parse(text); } catch (e) {
+      setStatus(key, 'fail', 'bad JSON', text.slice(0, 300));
+      return { ok: false, status: 'parse-error', detail: text.slice(0, 300) };
+    }
+    var imgCount = json.images && json.images.length;
+    if (imgCount) {
+      setStatus(key, 'pass', 'OK', imgCount + ' image(s) — "' + (json.description || '').slice(0, 100) + '"');
+      return { ok: true, detail: imgCount + ' images' };
+    }
+    setStatus(key, 'fail', 'empty', JSON.stringify(json).slice(0, 300));
+    return { ok: false, status: 'empty', detail: JSON.stringify(json).slice(0, 300) };
+  } catch (e) {
+    clearTimeout(timeout);
+    var msg = (e && e.message) || String(e);
+    var label = /abort/i.test(msg) ? ('timeout (' + secs(timeoutMs) + ')') : (/Failed to fetch|NetworkError/i.test(msg) ? 'network/CORS fail' : 'error');
+    setStatus(key, 'fail', label, msg);
+    return { ok: false, status: 'network', detail: msg };
+  }
+}
+
+// A simple GET-with-query-param API, not chat-completions schema, and the response
+// shape isn't documented anywhere I could find — so this defensively checks several
+// common field names. Also: Render's free tier sleeps idle services, so the FIRST
+// call after a while can take 50s+ just to wake the container up. A slow pass here
+// is normal; a timeout on a cold instance isn't necessarily a dead project.
+async function testFreeGPTRender(sk, modelId, timeoutMs) {
+  var key = sk + '::' + modelId;
+  var ep = ENDPOINTS[sk];
+  setStatus(key, 'running', 'waking up (Render free tier can take 50s+ if idle)…', '');
+  var controller = new AbortController();
+  var timeout = setTimeout(function () { controller.abort(); }, timeoutMs);
+  try {
+    var url = ep.url + '?query=' + encodeURIComponent('Reply with only the word OK.');
+    var res = await fetch(url, {
+      method: 'GET',
+      headers: Object.assign({ 'Accept': 'application/json' }, ep.headers),
+      signal: controller.signal
+    });
+    clearTimeout(timeout);
+    var text = await res.text();
+    if (!res.ok) {
+      setStatus(key, 'fail', 'HTTP ' + res.status, text.slice(0, 300));
+      return { ok: false, status: res.status, detail: text.slice(0, 300) };
+    }
+    var json;
+    try { json = JSON.parse(text); } catch (e) {
+      setStatus(key, 'fail', 'bad JSON', text.slice(0, 300));
+      return { ok: false, status: 'parse-error', detail: text.slice(0, 300) };
+    }
+    var content = json.response || json.message || json.content || json.text || json.answer || json.result;
+    if (content) {
+      setStatus(key, 'pass', 'OK', 'response: "' + String(content).slice(0, 120) + '"');
+      return { ok: true, detail: String(content).slice(0, 120) };
+    }
+    setStatus(key, 'fail', 'unrecognized response shape', JSON.stringify(json).slice(0, 300));
+    return { ok: false, status: 'empty', detail: JSON.stringify(json).slice(0, 300) };
+  } catch (e) {
+    clearTimeout(timeout);
+    var msg = (e && e.message) || String(e);
+    var label = /abort/i.test(msg) ? ('timeout (' + secs(timeoutMs) + ' — cold Render start may need even more)') : (/Failed to fetch|NetworkError/i.test(msg) ? 'network/CORS fail' : 'error');
+    setStatus(key, 'fail', label, msg);
+    return { ok: false, status: 'network', detail: msg };
+  }
+}
+
+// Different modality from every other row: this returns raw image bytes, not JSON.
+// A pass just means "server returned something with an image/* content-type and a
+// non-zero body" — it doesn't try to inspect the actual picture.
+async function testPollinationsImg(sk, modelId, timeoutMs) {
+  var key = sk + '::' + modelId;
+  var ep = ENDPOINTS[sk];
+  setStatus(key, 'running', 'generating image…', '');
+  var controller = new AbortController();
+  var timeout = setTimeout(function () { controller.abort(); }, timeoutMs);
+  try {
+    var url = ep.url + encodeURIComponent('a single red apple on a white background') +
+      '?width=256&height=256&model=' + encodeURIComponent(modelId) + '&nologo=true';
+    var res = await fetch(url, { headers: ep.headers, signal: controller.signal });
+    clearTimeout(timeout);
+    if (!res.ok) {
+      var errText = '';
+      try { errText = await res.text(); } catch (e) {}
+      setStatus(key, 'fail', 'HTTP ' + res.status, errText.slice(0, 300));
+      return { ok: false, status: res.status, detail: errText.slice(0, 300) };
+    }
+    var ctype = res.headers.get('content-type') || '';
+    var blob = await res.blob();
+    if (ctype.indexOf('image/') === 0 && blob.size > 0) {
+      setStatus(key, 'pass', 'OK', ctype + ', ' + blob.size + ' bytes');
+      return { ok: true, detail: ctype + ', ' + blob.size + ' bytes' };
+    }
+    setStatus(key, 'fail', 'not an image', 'content-type: ' + ctype + ', size: ' + blob.size);
+    return { ok: false, status: 'not-image', detail: 'content-type: ' + ctype + ', size: ' + blob.size };
+  } catch (e) {
+    clearTimeout(timeout);
+    var msg = (e && e.message) || String(e);
+    var label = /abort/i.test(msg) ? ('timeout (' + secs(timeoutMs) + ')') : (/Failed to fetch|NetworkError/i.test(msg) ? 'network/CORS fail' : 'error');
+    setStatus(key, 'fail', label, msg);
+    return { ok: false, status: 'network', detail: msg };
+  }
+}
+
+// Its own docs show a request/response shape for /ai/translate ({"translated": "..."}) but not
+// for /ai/generate specifically, so this defensively checks several plausible field names rather
+// than assuming one. No model param exists on this API at all — see the comment on this source's
+// model entry above.
+async function testDevToolBox(sk, modelId, timeoutMs) {
+  var key = sk + '::' + modelId;
+  var ep = ENDPOINTS[sk];
+  setStatus(key, 'running', 'testing…', '');
+  var controller = new AbortController();
+  var timeout = setTimeout(function () { controller.abort(); }, timeoutMs);
+  try {
+    var res = await fetch(ep.url, {
+      method: 'POST',
+      headers: Object.assign({ 'Content-Type': 'application/json' }, ep.headers),
+      body: JSON.stringify({ prompt: 'Reply with only the word OK.', max_tokens: 20 }),
+      signal: controller.signal
+    });
+    clearTimeout(timeout);
+    var text = await res.text();
+    if (!res.ok) {
+      setStatus(key, 'fail', 'HTTP ' + res.status, text.slice(0, 300));
+      return { ok: false, status: res.status, detail: text.slice(0, 300) };
+    }
+    var json;
+    try { json = JSON.parse(text); } catch (e) {
+      setStatus(key, 'fail', 'bad JSON', text.slice(0, 300));
+      return { ok: false, status: 'parse-error', detail: text.slice(0, 300) };
+    }
+    var content = json.generated || json.response || json.result || json.text || json.output;
+    if (content) {
+      setStatus(key, 'pass', 'OK', 'response: "' + String(content).slice(0, 120) + '"');
+      return { ok: true, detail: String(content).slice(0, 120) };
+    }
+    setStatus(key, 'fail', 'unrecognized response shape', JSON.stringify(json).slice(0, 300));
+    return { ok: false, status: 'empty', detail: JSON.stringify(json).slice(0, 300) };
+  } catch (e) {
+    clearTimeout(timeout);
+    var msg = (e && e.message) || String(e);
+    var label = /abort/i.test(msg) ? ('timeout (' + secs(timeoutMs) + ')') : (/Failed to fetch|NetworkError/i.test(msg) ? 'network/CORS fail' : 'error');
+    setStatus(key, 'fail', label, msg);
+    return { ok: false, status: 'network', detail: msg };
+  }
+}
+
+function showSummary(results) {
+  var bySource = {};
+  Object.keys(results).forEach(function (key) {
+    var sk = rowMap[key].source;
+    if (!bySource[sk]) bySource[sk] = { pass: 0, fail: 0, total: 0 };
+    bySource[sk].total++;
+    if (results[key].ok) bySource[sk].pass++; else bySource[sk].fail++;
+  });
+  var html = '<strong>Summary</strong><br>';
+  Object.keys(bySource).forEach(function (sk) {
+    var s = bySource[sk];
+    var verdict = s.pass === 0 ? 'ALL FAILED' : s.pass === s.total ? 'ALL PASSED' : (s.pass + '/' + s.total + ' passed');
+    html += SOURCES[sk].label + ': ' + verdict + '<br>';
+  });
+  var summaryEl = document.getElementById('summary');
+  summaryEl.innerHTML = html;
+  summaryEl.style.display = 'block';
+}
+
+async function runGroup(skOrList) {
+  var skList = Array.isArray(skOrList) ? skOrList : [skOrList];
+  document.getElementById('runBtn').disabled = true;
+  var progressEl = document.getElementById('progress');
+  var keys = Object.keys(rowMap).filter(function (k) { return skList.indexOf(rowMap[k].source) !== -1; });
+  var results = {};
+  for (var i = 0; i < keys.length; i++) {
+    var sk = rowMap[keys[i]].source;
+    progressEl.textContent = '(' + (i + 1) + ' / ' + keys.length + ') ' + keys[i];
+    results[keys[i]] = await testOne(sk, rowMap[keys[i]].model, rowMap[keys[i]].timeoutMs);
+    await sleep(ENDPOINTS[sk].gapMs);
+  }
+  progressEl.textContent = 'done';
+  document.getElementById('runBtn').disabled = false;
+  showSummary(results);
+}
+
+async function runAll() {
+  document.getElementById('runBtn').disabled = true;
+  var progressEl = document.getElementById('progress');
+  var allKeys = Object.keys(rowMap);
+  var results = {};
+  for (var i = 0; i < allKeys.length; i++) {
+    var key = allKeys[i];
+    var sk = rowMap[key].source;
+    progressEl.textContent = '(' + (i + 1) + ' / ' + allKeys.length + ') ' + key;
+    results[key] = await testOne(sk, rowMap[key].model, rowMap[key].timeoutMs);
+    await sleep(ENDPOINTS[sk].gapMs);
+  }
+  progressEl.textContent = 'done';
+  document.getElementById('runBtn').disabled = false;
+  showSummary(results);
+}
+</script>
+</body>
+</html>
